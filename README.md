@@ -12,7 +12,18 @@ Here are two recommended distributions.
 
 Open a terminal and install the required environment.
 
+Verify that python and git work.
 ```bash
+python --help
+git --help
+```
+
+If you have git proceed. If you do not have git, you can get the [zip file of the code](https://github.com/fakufaku/nanoSE/archive/refs/heads/main.zip).
+
+```bash
+# Clone the repository
+git clone https://github.com/fakufaku/nanoSE.git
+
 # Setup virtual environment
 python3 -m venv .venv
 source .venv/bin/activate
