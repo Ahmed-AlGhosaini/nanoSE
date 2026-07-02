@@ -1,0 +1,14 @@
+torch
+torchvision
+torchaudio
+numpy
+matplotlib
+datasets
+pyarrow
+soundfile
+librosa
+torchmetrics[audio]
+onnxruntime
+fast_bss_eval
+pesq
+pystoi

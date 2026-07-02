@@ -1,0 +1,100 @@
+import argparse
+import os
+import warnings
+
+# Suppress noisy PyTorch MPS-specific resizing warnings
+warnings.filterwarnings(
+    "ignore", category=UserWarning, message=".*resized since it had shape.*"
+)
+
+import torch
+import torchaudio
+
+from model import enhance_waveform, get_model
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Enhance a noisy audio file using a trained checkpoint."
+    )
+    parser.add_argument("noisy_wav", type=str, help="Path to input noisy WAV file")
+    parser.add_argument("output_wav", type=str, help="Path to output enhanced WAV file")
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        required=True,
+        help="Path to trained model checkpoint (.pt)",
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="crn",
+        choices=["crn", "crntiny", "fastenhancer", "fastenhancercompact", "glumaskd", "glumasked", "comfi_fastgrnn"],
+        help="Model architecture of the checkpoint",
+    )
+    args = parser.parse_args()
+
+    if not os.path.exists(args.noisy_wav):
+        print(f"Error: Noisy file '{args.noisy_wav}' not found.")
+        return
+
+    if not os.path.exists(args.checkpoint):
+        print(f"Error: Checkpoint '{args.checkpoint}' not found.")
+        return
+
+    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    print(f"Using device: {device.type.upper()}")
+
+    # 1. Load trained model
+    print(f"Loading {args.model} model checkpoint...")
+    model = get_model(args.model).to(device)
+
+    # Load state dict (handle potential torch.compile wrapper)
+    state_dict = torch.load(args.checkpoint, map_location=device)
+    # Strip '_orig_mod.' prefix if checkpoint was saved from a compiled model
+    clean_state_dict = {}
+    for k, v in state_dict.items():
+        if k.startswith("_orig_mod."):
+            clean_state_dict[k[10:]] = v
+        else:
+            clean_state_dict[k] = v
+
+    model.load_state_dict(clean_state_dict)
+    model.eval()
+
+    # 2. Load audio
+    print(f"Loading noisy audio from '{args.noisy_wav}'...")
+    waveform, sr = torchaudio.load(args.noisy_wav)
+
+    # Standardize channels: average multi-channel inputs to mono
+    if waveform.size(0) > 1:
+        print("Input has multiple channels; downmixing to mono.")
+        waveform = torch.mean(waveform, dim=0, keepdim=True)
+
+    # Resample to 16kHz if necessary
+    if sr != 16000:
+        print(f"Resampling from {sr}Hz to 16000Hz...")
+        resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=16000)
+        waveform = resampler(waveform)
+        sr = 16000
+
+    # 3. Enhance audio
+    print("Enhancing audio waveform...")
+    # Add batch dimension: [B=1, num_samples]
+    waveform = waveform.to(device)
+    with torch.no_grad():
+        # enhance_waveform handles STFT, cropping, masking, polar reconstruction, and iSTFT
+        enhanced_wav = enhance_waveform(model, waveform)
+
+    # Squeeze out batch dimension and move back to CPU
+    enhanced_wav = enhanced_wav.cpu()
+
+    # 4. Save enhanced audio
+    os.makedirs(os.path.dirname(os.path.abspath(args.output_wav)), exist_ok=True)
+    print(f"Saving enhanced audio to '{args.output_wav}'...")
+    torchaudio.save(args.output_wav, enhanced_wav, sr)
+    print("Enhancement complete!")
+
+
+if __name__ == "__main__":
+    main()
