@@ -95,7 +95,16 @@ def create_spec_plot(noisy, clean, enhanced):
     return fig
 
 
-def run_validation(model, test_loader, device, metrics, eval_audio_indices, writer, global_step, eval_samples_limit=20):
+def run_validation(
+    model,
+    test_loader,
+    device,
+    metrics,
+    eval_audio_indices,
+    writer,
+    global_step,
+    eval_samples_limit=20,
+):
     model.eval()
     val_si_sdr = 0.0
     val_pesq = []
@@ -104,9 +113,7 @@ def run_validation(model, test_loader, device, metrics, eval_audio_indices, writ
 
     eval_count = 0
 
-    val_bar = tqdm(
-        test_loader, desc=f"Validation (Step {global_step})", leave=False
-    )
+    val_bar = tqdm(test_loader, desc=f"Validation (Step {global_step})", leave=False)
     with torch.no_grad():
         for idx, (noisy, clean) in enumerate(val_bar):
             noisy, clean = noisy.to(device), clean.to(device)
@@ -169,7 +176,7 @@ def run_validation(model, test_loader, device, metrics, eval_audio_indices, writ
         "val_si_sdr": val_si_sdr,
         "pesq": avg_pesq,
         "estoi": avg_estoi,
-        "dnsmos": avg_dnsmos
+        "dnsmos": avg_dnsmos,
     }
 
 
@@ -178,6 +185,7 @@ def save_metrics_to_jsonl(metrics_dict, epoch, log_dir):
     metrics_dict["epoch"] = epoch
 
     import json
+
     os.makedirs(log_dir, exist_ok=True)
     jsonl_path = os.path.join(log_dir, "validation_metrics.jsonl")
 
@@ -214,7 +222,15 @@ def main():
         "--model",
         type=str,
         default=None,
-        choices=["crn", "crntiny", "fastenhancer", "fastenhancercompact", "glumaskd", "glumasked", "comfi_fastgrnn"],
+        choices=[
+            "crn",
+            "crntiny",
+            "fastenhancer",
+            "fastenhancercompact",
+            "glumaskd",
+            "glumasked",
+            "comfi_fastgrnn",
+        ],
         help="Model architecture to use",
     )
     parser.add_argument(
@@ -234,13 +250,13 @@ def main():
         "--config",
         type=str,
         default="config/default_config.py",
-        help="Path to python configuration file defining override variables."
+        help="Path to python configuration file defining override variables.",
     )
     parser.add_argument(
         "--name",
         type=str,
         default=None,
-        help="Name to identify the run, used in log directory formatting."
+        help="Name to identify the run, used in log directory formatting.",
     )
     args = parser.parse_args()
 
@@ -252,7 +268,9 @@ def main():
             with open(default_config_path, "r") as f:
                 exec(f.read(), {}, config_vars)
         except Exception as e:
-            print(f"Warning: Failed to load default config from {default_config_path}: {e}")
+            print(
+                f"Warning: Failed to load default config from {default_config_path}: {e}"
+            )
 
     # 2. Load the custom config file if specified and different from default
     if args.config and args.config != default_config_path:
@@ -275,7 +293,12 @@ def main():
 
     # 4. Apply all configuration variables back to args
     for name_var, val in list(config_vars.items()):
-        if name_var.startswith("__") or name_var == "dry_run" or isinstance(val, type(os)) or isinstance(val, type):
+        if (
+            name_var.startswith("__")
+            or name_var == "dry_run"
+            or isinstance(val, type(os))
+            or isinstance(val, type)
+        ):
             continue
         setattr(args, name_var, val)
 
@@ -294,8 +317,13 @@ def main():
     # NanoGPT-style floating point precision tweak
     torch.set_float32_matmul_precision("high")
 
-    # Choose device (Metal GPU preferred on macOS)
-    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    # Choose device (CUDA GPU preferred, then Metal GPU, then CPU)
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
     print(f"Running training on device: {device.type.upper()}")
 
     # Setup directories and label
@@ -313,17 +341,19 @@ def main():
         run_dir = f"{label}_{timestamp}"
 
     tb_dir = f"runs/{run_dir}"
-    checkpoint_dir = f"checkpoints/{run_dir}"
+    checkpoint_dir = os.path.join(tb_dir, "checkpoints")
 
     # Copy configuration file to log folder if provided
     if args.config:
         import shutil
+
         os.makedirs(tb_dir, exist_ok=True)
         shutil.copy(args.config, os.path.join(tb_dir, "config.py"))
         print(f"Copied config file to log folder: {tb_dir}/config.py")
 
     # Save the command line that can be used to reproduce the experiment
     import sys
+
     reproduce_args = []
     i = 0
     while i < len(sys.argv):
@@ -343,7 +373,7 @@ def main():
             else:
                 reproduce_args.append(arg)
             i += 1
-            
+
     reproduce_cmd = " ".join(reproduce_args)
     reproduce_file_path = os.path.join(tb_dir, "reproduce.sh")
     try:
@@ -364,8 +394,10 @@ def main():
 
     # Dataloader setups
     mock_size = 64 if args.dry_run else None
-    train_dataset = VoiceBankDemandDataset(split="train", mock_size=mock_size)
-    test_dataset = VoiceBankDemandDataset(split="test", mock_size=mock_size)
+    # For CUDA and MPS devices, load the whole dataset onto the GPU device
+    ds_device = device if device.type in ("cuda", "mps") else None
+    train_dataset = VoiceBankDemandDataset(split="train", mock_size=mock_size, device=ds_device)
+    test_dataset = VoiceBankDemandDataset(split="test", mock_size=mock_size, device=ds_device)
 
     train_loader = DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=True, drop_last=True
@@ -389,7 +421,11 @@ def main():
     # Try compiling model if requested
     if args.compile:
         try:
-            model_name = args.model if isinstance(args.model, str) else args.model.__class__.__name__
+            model_name = (
+                args.model
+                if isinstance(args.model, str)
+                else args.model.__class__.__name__
+            )
             print(f"Compiling model {model_name} using torch.compile()...")
             model = torch.compile(model, mode="max-autotune")
             print("Model compiled successfully.")
@@ -434,7 +470,7 @@ def main():
         eval_audio_indices=eval_audio_indices,
         writer=writer,
         global_step=0,
-        eval_samples_limit=20
+        eval_samples_limit=20,
     )
     save_metrics_to_jsonl(val_results, epoch=0, log_dir=tb_dir)
     print(
@@ -521,7 +557,7 @@ def main():
             eval_audio_indices=eval_audio_indices,
             writer=writer,
             global_step=global_step,
-            eval_samples_limit=20
+            eval_samples_limit=20,
         )
         save_metrics_to_jsonl(val_results, epoch=epoch, log_dir=tb_dir)
 

@@ -93,22 +93,27 @@ def main():
     # Find the latest checkpoint if not provided
     checkpoint_path = args.checkpoint
     if not checkpoint_path:
-        checkpoint_dir = "checkpoints"
-        if os.path.exists(checkpoint_dir):
-            pt_files = [
-                os.path.join(checkpoint_dir, f)
-                for f in os.listdir(checkpoint_dir)
-                if f.endswith(".pt")
-            ]
-            if pt_files:
-                pt_files.sort()
-                checkpoint_path = pt_files[-1]
-                print(f"No checkpoint specified. Selected latest: {checkpoint_path}")
-            else:
-                print("Error: No checkpoints found in 'checkpoints/' folder.")
-                return
+        pt_files = []
+        # Search recursively in runs/
+        if os.path.exists("runs"):
+            for root, _, files in os.walk("runs"):
+                for f in files:
+                    if f.endswith(".pt"):
+                        pt_files.append(os.path.join(root, f))
+        # Search recursively in checkpoints/
+        if os.path.exists("checkpoints"):
+            for root, _, files in os.walk("checkpoints"):
+                for f in files:
+                    if f.endswith(".pt"):
+                        pt_files.append(os.path.join(root, f))
+
+        if pt_files:
+            # Sort by path / name (latest timestamp / epoch)
+            pt_files.sort()
+            checkpoint_path = pt_files[-1]
+            print(f"No checkpoint specified. Selected latest: {checkpoint_path}")
         else:
-            print("Error: 'checkpoints/' directory not found.")
+            print("Error: No checkpoints found in 'runs/' or 'checkpoints/' folders.")
             return
 
     if not os.path.exists(checkpoint_path):
@@ -117,7 +122,13 @@ def main():
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    # Choose device (CUDA GPU preferred, then Metal GPU, then CPU)
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
     print(f"Running evaluation on device: {device.type.upper()}")
 
     # Determine model type (auto-detect based on checkpoint filename, fallback to --model)
@@ -146,7 +157,9 @@ def main():
 
     # 3. Load dataset (mock_size speeds up caching significantly)
     print("Loading dataset...")
-    dataset = VoiceBankDemandDataset(split="test", mock_size=args.num_samples)
+    # For CUDA and MPS devices, load the whole dataset onto the GPU device
+    ds_device = device if device.type in ("cuda", "mps") else None
+    dataset = VoiceBankDemandDataset(split="test", mock_size=args.num_samples, device=ds_device)
 
     samples_html_list = []
 
@@ -207,14 +220,14 @@ def main():
 
         # Save audio files
         torchaudio.save(
-            os.path.join(args.output_dir, noisy_filename), noisy_wav.unsqueeze(0), 16000
+            os.path.join(args.output_dir, noisy_filename), noisy_wav.unsqueeze(0).cpu(), 16000
         )
         torchaudio.save(
-            os.path.join(args.output_dir, clean_filename), clean_wav.unsqueeze(0), 16000
+            os.path.join(args.output_dir, clean_filename), clean_wav.unsqueeze(0).cpu(), 16000
         )
         torchaudio.save(
             os.path.join(args.output_dir, enhanced_filename),
-            enhanced_wav.unsqueeze(0),
+            enhanced_wav.unsqueeze(0).cpu(),
             16000,
         )
 

@@ -36,10 +36,22 @@ class SpeechMetrics:
         ref_ch = ref.unsqueeze(1)
         est_ch = est.unsqueeze(1)
 
+        # Fall back to CPU for fast_bss_eval if inputs are on MPS due to operator support limitations
+        is_mps = ref_ch.device.type == "mps"
+        if is_mps:
+            ref_ch_calc = ref_ch.cpu()
+            est_ch_calc = est_ch.cpu()
+        else:
+            ref_ch_calc = ref_ch
+            est_ch_calc = est_ch
+
         # Compute SI-SDR
         # zero_mean=True standardizes signals before computing SDR
-        neg_sdr = fast_bss_eval.sdr_loss(est_ch, ref_ch, filter_length=1, zero_mean=True, clamp_db=30, pairwise=False)  # shape: [B, 1]
+        neg_sdr = fast_bss_eval.sdr_loss(est_ch_calc, ref_ch_calc, filter_length=1, zero_mean=True, clamp_db=30, pairwise=False)  # shape: [B, 1]
         sdr = -neg_sdr
+
+        if is_mps:
+            sdr = sdr.to(device=ref.device)
 
         # Squeeze out channel dimension
         sdr = sdr.squeeze(1)  # shape: [B]

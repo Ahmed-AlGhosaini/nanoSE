@@ -11,8 +11,9 @@ from tqdm import tqdm
 
 
 class VoiceBankDemandDataset(Dataset):
-    def __init__(self, split="train", sample_rate=16000, duration=2.0, mock_size=None):
+    def __init__(self, split="train", sample_rate=16000, duration=2.0, mock_size=None, device=None):
         self.sample_rate = sample_rate
+        self.device = device
         if split == "test":
             self.target_length = None
         else:
@@ -72,6 +73,12 @@ class VoiceBankDemandDataset(Dataset):
                 flat_array = flat_array[:num_segments * self.target_length * 2]
                 self.cached_array = flat_array.reshape(-1, self.target_length, 2)
                 print(f"Loaded {len(self.cached_array)} cached segments of length {self.target_length}.")
+            
+            if self.device is not None:
+                self.cached_tensor = torch.from_numpy(self.cached_array).to(self.device)
+                print(f"Loaded whole training dataset onto device: {self.device}")
+            else:
+                self.cached_tensor = None
         else:
             # Custom binary caching for evaluation/test split
             cache_suffix = f"_mock_{mock_size}" if mock_size is not None else ""
@@ -149,6 +156,11 @@ class VoiceBankDemandDataset(Dataset):
                 with open(self.cache_path, "wb") as f:
                     f.write(full_buffer)
                 print(f"Successfully cached {num_samples} samples to {self.cache_path}.")
+            
+            if self.device is not None:
+                self.clean_cached = [t.to(self.device) for t in self.clean_cached]
+                self.noisy_cached = [t.to(self.device) for t in self.noisy_cached]
+                print(f"Loaded whole evaluation dataset onto device: {self.device}")
 
     def __len__(self):
         if hasattr(self, "cached_array"):
@@ -156,6 +168,12 @@ class VoiceBankDemandDataset(Dataset):
         return len(self.clean_cached)
 
     def __getitem__(self, idx):
+        if hasattr(self, "cached_tensor") and self.cached_tensor is not None:
+            segment = self.cached_tensor[idx] # shape: (fixed_length, 2)
+            noisy_f32 = segment[:, 0].to(torch.float32) / 32767.0
+            clean_f32 = segment[:, 1].to(torch.float32) / 32767.0
+            return noisy_f32, clean_f32
+
         if hasattr(self, "cached_array"):
             segment = self.cached_array[idx] # shape: (fixed_length, 2)
             noisy_int16 = segment[:, 0]
