@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Robin Scheibler <fakufaku@gmail.com>
+# License: MIT (see LICENSE file at the root of the repository)
+
 import argparse
 import os
 import warnings

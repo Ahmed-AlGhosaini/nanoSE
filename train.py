@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Robin Scheibler <fakufaku@gmail.com>
+# License: MIT (see LICENSE file at the root of the repository)
+
 import argparse
 import os
 import random
@@ -92,37 +95,133 @@ def create_spec_plot(noisy, clean, enhanced):
     return fig
 
 
+def run_validation(model, test_loader, device, metrics, eval_audio_indices, writer, global_step, eval_samples_limit=20):
+    model.eval()
+    val_si_sdr = 0.0
+    val_pesq = []
+    val_estoi = []
+    val_dnsmos = []
+
+    eval_count = 0
+
+    val_bar = tqdm(
+        test_loader, desc=f"Validation (Step {global_step})", leave=False
+    )
+    with torch.no_grad():
+        for idx, (noisy, clean) in enumerate(val_bar):
+            noisy, clean = noisy.to(device), clean.to(device)
+            enhanced = enhance_waveform(model, noisy)
+
+            # Log audio and spectrogram plots to TensorBoard for uniformly selected samples
+            if idx in eval_audio_indices:
+                writer.add_audio(
+                    f"audio/noisy/{idx}",
+                    noisy[0].cpu(),
+                    global_step,
+                    sample_rate=16000,
+                )
+                writer.add_audio(
+                    f"audio/clean/{idx}",
+                    clean[0].cpu(),
+                    global_step,
+                    sample_rate=16000,
+                )
+                writer.add_audio(
+                    f"audio/enhanced/{idx}",
+                    enhanced[0].cpu(),
+                    global_step,
+                    sample_rate=16000,
+                )
+
+                fig = create_spec_plot(noisy[0], clean[0], enhanced[0])
+                writer.add_figure(f"plots/spectrogram/{idx}", fig, global_step)
+                plt.close(fig)
+
+            # Compute fast test SI-SDR
+            current_val_sdr = metrics.compute_si_sdr(clean, enhanced).mean().item()
+            val_si_sdr += current_val_sdr
+
+            # Compute heavy eval metrics on a subset
+            if eval_count < eval_samples_limit:
+                batch_rem = eval_samples_limit - eval_count
+                batch_ref = clean[:batch_rem]
+                batch_est = enhanced[:batch_rem]
+
+                scores = metrics.compute_eval_metrics(batch_ref, batch_est)
+                val_pesq.append(scores["pesq"])
+                val_estoi.append(scores["estoi"])
+                val_dnsmos.append(scores["dnsmos"])
+                eval_count += batch_ref.size(0)
+
+            val_bar.set_postfix(sdr=f"{current_val_sdr:.1f}dB")
+
+    val_si_sdr /= len(test_loader)
+    avg_pesq = np.nanmean(val_pesq) if val_pesq else float("nan")
+    avg_estoi = np.nanmean(val_estoi) if val_estoi else float("nan")
+    avg_dnsmos = np.nanmean(val_dnsmos) if val_dnsmos else float("nan")
+
+    writer.add_scalar("eval/dnsmos", avg_dnsmos, global_step)
+    writer.add_scalar("eval/estoi", avg_estoi, global_step)
+    writer.add_scalar("eval/pesq", avg_pesq, global_step)
+    writer.add_scalar("eval/si-sdr", val_si_sdr, global_step)
+
+    return {
+        "val_si_sdr": val_si_sdr,
+        "pesq": avg_pesq,
+        "estoi": avg_estoi,
+        "dnsmos": avg_dnsmos
+    }
+
+
+def save_metrics_to_jsonl(metrics_dict, epoch, log_dir):
+    # Add the epoch number to the metrics dict before saving
+    metrics_dict["epoch"] = epoch
+
+    import json
+    os.makedirs(log_dir, exist_ok=True)
+    jsonl_path = os.path.join(log_dir, "validation_metrics.jsonl")
+
+    with open(jsonl_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(metrics_dict) + "\n")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Speech Enhancement Training Pipeline")
     parser.add_argument(
-        "--epochs", type=int, default=25, help="Number of training epochs"
+        "--epochs", type=int, default=None, help="Number of training epochs"
     )
     parser.add_argument(
-        "--batch-size", type=int, default=32, help="Batch size for training"
+        "--batch-size", type=int, default=None, help="Batch size for training"
     )
-    parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
-    parser.add_argument("--wd", type=float, default=0.02, help="Learning rate")
+    parser.add_argument("--lr", type=float, default=None, help="Learning rate")
+    parser.add_argument("--wd", type=float, default=None, help="Weight decay")
     parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Run a quick dry-run with a tiny dataset fraction",
     )
     parser.add_argument(
-        "--compile", action="store_true", help="Compile model using torch.compile()"
+        "--compile",
+        action="store_const",
+        const=True,
+        default=None,
+        help="Compile model using torch.compile()",
     )
     parser.add_argument(
-        "--seed", type=int, default=42, help="The random number generator seed."
+        "--seed", type=int, default=None, help="The random number generator seed."
     )
     parser.add_argument(
         "--model",
         type=str,
-        default="crn",
+        default=None,
         choices=["crn", "crntiny", "fastenhancer", "fastenhancercompact", "glumaskd", "glumasked", "comfi_fastgrnn"],
         help="Model architecture to use",
     )
     parser.add_argument(
         "--remix",
-        action="store_true",
+        action="store_const",
+        const=True,
+        default=None,
         help="Apply dynamic random noise remixing in the batch during training.",
     )
     parser.add_argument(
@@ -131,7 +230,58 @@ def main():
         default=None,
         help="Label for this training run. Defaults to model name if not specified.",
     )
+    parser.add_argument(
+        "--config",
+        type=str,
+        default="config/default_config.py",
+        help="Path to python configuration file defining override variables."
+    )
+    parser.add_argument(
+        "--name",
+        type=str,
+        default=None,
+        help="Name to identify the run, used in log directory formatting."
+    )
     args = parser.parse_args()
+
+    # 1. Load the default config file first
+    config_vars = {}
+    default_config_path = "config/default_config.py"
+    if os.path.exists(default_config_path):
+        try:
+            with open(default_config_path, "r") as f:
+                exec(f.read(), {}, config_vars)
+        except Exception as e:
+            print(f"Warning: Failed to load default config from {default_config_path}: {e}")
+
+    # 2. Load the custom config file if specified and different from default
+    if args.config and args.config != default_config_path:
+        if not os.path.exists(args.config):
+            raise FileNotFoundError(f"Config file not found: {args.config}")
+        try:
+            with open(args.config, "r") as f:
+                exec(f.read(), {}, config_vars)
+            print(f"Loaded configuration from: {args.config}")
+        except Exception as e:
+            raise RuntimeError(f"Error executing configuration file {args.config}: {e}")
+
+    # 3. Apply CLI overrides (any argument that is explicitly passed/not None)
+    for name_var, val in vars(args).items():
+        if name_var == "config" or name_var == "dry_run":
+            continue
+        if val is not None:
+            config_vars[name_var] = val
+            print(f"Command line override: {name_var} = {val}")
+
+    # 4. Apply all configuration variables back to args
+    for name_var, val in list(config_vars.items()):
+        if name_var.startswith("__") or name_var == "dry_run" or isinstance(val, type(os)) or isinstance(val, type):
+            continue
+        setattr(args, name_var, val)
+
+    if args.dry_run:
+        args.epochs = 1
+        print("Dry-run mode active: forcing epochs = 1")
 
     # Set random seed for reproducibility / determinism
     random.seed(args.seed)
@@ -152,10 +302,59 @@ def main():
     from datetime import datetime
 
     label = args.run_label if args.run_label else args.model
+    if not isinstance(label, str):
+        label = label.__class__.__name__
+
     timestamp = datetime.now().isoformat(timespec="seconds").replace(":", "-")
-    run_dir = f"{label}_{timestamp}"
+
+    if args.name:
+        run_dir = f"{timestamp}_{args.name}"
+    else:
+        run_dir = f"{label}_{timestamp}"
+
     tb_dir = f"runs/{run_dir}"
     checkpoint_dir = f"checkpoints/{run_dir}"
+
+    # Copy configuration file to log folder if provided
+    if args.config:
+        import shutil
+        os.makedirs(tb_dir, exist_ok=True)
+        shutil.copy(args.config, os.path.join(tb_dir, "config.py"))
+        print(f"Copied config file to log folder: {tb_dir}/config.py")
+
+    # Save the command line that can be used to reproduce the experiment
+    import sys
+    reproduce_args = []
+    i = 0
+    while i < len(sys.argv):
+        arg = sys.argv[i]
+        if arg == "--config" and i + 1 < len(sys.argv):
+            reproduce_args.append(arg)
+            copied_config_path = os.path.abspath(os.path.join(tb_dir, "config.py"))
+            reproduce_args.append(copied_config_path)
+            i += 2
+        elif arg.startswith("--config="):
+            copied_config_path = os.path.abspath(os.path.join(tb_dir, "config.py"))
+            reproduce_args.append(f"--config={copied_config_path}")
+            i += 1
+        else:
+            if i == 0:
+                reproduce_args.append(f"python {os.path.basename(arg)}")
+            else:
+                reproduce_args.append(arg)
+            i += 1
+            
+    reproduce_cmd = " ".join(reproduce_args)
+    reproduce_file_path = os.path.join(tb_dir, "reproduce.sh")
+    try:
+        os.makedirs(tb_dir, exist_ok=True)
+        with open(reproduce_file_path, "w") as f_reprod:
+            f_reprod.write("#!/bin/bash\n")
+            f_reprod.write(reproduce_cmd + "\n")
+        os.chmod(reproduce_file_path, 0o755)
+        print(f"Saved reproduction command to: {reproduce_file_path}")
+    except Exception as e:
+        print(f"Failed to save reproduction command: {e}")
 
     # Initialize metric helper
     metrics = SpeechMetrics(device=device)
@@ -181,12 +380,17 @@ def main():
     )
 
     # Initialize model
-    model = get_model(args.model).to(device)
+    if isinstance(args.model, torch.nn.Module):
+        model = args.model.to(device)
+        print(f"Using custom model object from config: {model.__class__.__name__}")
+    else:
+        model = get_model(args.model).to(device)
 
     # Try compiling model if requested
     if args.compile:
         try:
-            print(f"Compiling model {args.model} using torch.compile()...")
+            model_name = args.model if isinstance(args.model, str) else args.model.__class__.__name__
+            print(f"Compiling model {model_name} using torch.compile()...")
             model = torch.compile(model, mode="max-autotune")
             print("Model compiled successfully.")
         except Exception as e:
@@ -220,6 +424,24 @@ def main():
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
     os.makedirs(checkpoint_dir, exist_ok=True)
+
+    print("Running initial validation pass (Epoch 0)...")
+    val_results = run_validation(
+        model=model,
+        test_loader=test_loader,
+        device=device,
+        metrics=metrics,
+        eval_audio_indices=eval_audio_indices,
+        writer=writer,
+        global_step=0,
+        eval_samples_limit=20
+    )
+    save_metrics_to_jsonl(val_results, epoch=0, log_dir=tb_dir)
+    print(
+        f"Epoch 00/{args.epochs:02d} (Initial) | "
+        f"Val SI-SDR: {val_results['val_si_sdr']:.2f}dB | "
+        f"PESQ: {val_results['pesq']:.2f} | STOI: {val_results['estoi']:.2f} | DNSMOS: {val_results['dnsmos']:.2f}\n"
+    )
 
     print("\n=== Start Training ===")
     epoch_bar = tqdm(range(1, args.epochs + 1), desc="Epochs")
@@ -291,76 +513,17 @@ def main():
             writer.add_scalar(f"train/{key}/epoch", val, global_step)
 
         # Validation / Evaluation Phase
-        model.eval()
-        val_si_sdr = 0.0
-        val_pesq = []
-        val_estoi = []
-        val_dnsmos = []
-
-        # Select 20 samples from test set to compute PESQ/STOI/DNSMOS to speed up training loop
-        eval_samples_limit = 20
-        eval_count = 0
-
-        val_bar = tqdm(
-            test_loader, desc=f"Epoch {epoch}/{args.epochs} (Val)", leave=False
+        val_results = run_validation(
+            model=model,
+            test_loader=test_loader,
+            device=device,
+            metrics=metrics,
+            eval_audio_indices=eval_audio_indices,
+            writer=writer,
+            global_step=global_step,
+            eval_samples_limit=20
         )
-        with torch.no_grad():
-            for idx, (noisy, clean) in enumerate(val_bar):
-                noisy, clean = noisy.to(device), clean.to(device)
-                enhanced = enhance_waveform(model, noisy)
-
-                # Log audio and spectrogram plots to TensorBoard for uniformly selected samples
-                if idx in eval_audio_indices:
-                    writer.add_audio(
-                        f"audio/noisy/{idx}",
-                        noisy[0].cpu(),
-                        global_step,
-                        sample_rate=16000,
-                    )
-                    writer.add_audio(
-                        f"audio/clean/{idx}",
-                        clean[0].cpu(),
-                        global_step,
-                        sample_rate=16000,
-                    )
-                    writer.add_audio(
-                        f"audio/enhanced/{idx}",
-                        enhanced[0].cpu(),
-                        global_step,
-                        sample_rate=16000,
-                    )
-
-                    fig = create_spec_plot(noisy[0], clean[0], enhanced[0])
-                    writer.add_figure(f"plots/spectrogram/{idx}", fig, global_step)
-                    plt.close(fig)
-
-                # Compute fast test SI-SDR
-                current_val_sdr = metrics.compute_si_sdr(clean, enhanced).mean().item()
-                val_si_sdr += current_val_sdr
-
-                # Compute heavy eval metrics on a subset
-                if eval_count < eval_samples_limit:
-                    batch_rem = eval_samples_limit - eval_count
-                    batch_ref = clean[:batch_rem]
-                    batch_est = enhanced[:batch_rem]
-
-                    scores = metrics.compute_eval_metrics(batch_ref, batch_est)
-                    val_pesq.append(scores["pesq"])
-                    val_estoi.append(scores["estoi"])
-                    val_dnsmos.append(scores["dnsmos"])
-                    eval_count += batch_ref.size(0)
-
-                val_bar.set_postfix(sdr=f"{current_val_sdr:.1f}dB")
-
-        val_si_sdr /= len(test_loader)
-        avg_pesq = np.nanmean(val_pesq) if val_pesq else float("nan")
-        avg_estoi = np.nanmean(val_estoi) if val_estoi else float("nan")
-        avg_dnsmos = np.nanmean(val_dnsmos) if val_dnsmos else float("nan")
-
-        writer.add_scalar("eval/dnsmos", avg_dnsmos, global_step)
-        writer.add_scalar("eval/estoi", avg_estoi, global_step)
-        writer.add_scalar("eval/pesq", avg_pesq, global_step)
-        writer.add_scalar("eval/si-sdr", val_si_sdr, global_step)
+        save_metrics_to_jsonl(val_results, epoch=epoch, log_dir=tb_dir)
 
         epoch_time = time.time() - epoch_start
         losses_str = ", ".join(
@@ -370,14 +533,14 @@ def main():
             f"Epoch {epoch:02d}/{args.epochs:02d} | "
             f"Loss: {train_loss:.4f} ({losses_str}) | "
             f"Train SI-SDR: {train_si_sdr:.2f}dB | "
-            f"Val SI-SDR: {val_si_sdr:.2f}dB | "
-            f"PESQ: {avg_pesq:.2f} | STOI: {avg_estoi:.2f} | DNSMOS: {avg_dnsmos:.2f} | "
+            f"Val SI-SDR: {val_results['val_si_sdr']:.2f}dB | "
+            f"PESQ: {val_results['pesq']:.2f} | STOI: {val_results['estoi']:.2f} | DNSMOS: {val_results['dnsmos']:.2f} | "
             f"Time: {epoch_time:.1f}s"
         )
         epoch_bar.set_postfix(
             loss=f"{train_loss:.4f}",
-            val_sdr=f"{val_si_sdr:.1f}dB",
-            pesq=f"{avg_pesq:.2f}",
+            val_sdr=f"{val_results['val_si_sdr']:.1f}dB",
+            pesq=f"{val_results['pesq']:.2f}",
         )
 
         # Save model checkpoint using args.model name
