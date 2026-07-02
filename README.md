@@ -32,7 +32,31 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+On windows, it is easier to use anaconda.
+Open **Anaconda prompt** and type the following.
+```bash
+# Create environment.
+conda create -n nanose
+
+# Activate the environment.
+conda activate nanose
+
+# Install dependencies.
+pip install -r requirements.txt
+```
+
+Everytime you restart, you'll need to type `conda activate nanose` to access the environment.
+
 ## Training & Configuration
+
+Don't forget to activate the environment with
+```bash
+source .venv/bin/activate
+```
+or, if you used anaconda environment,
+```bash
+conda activate nanose
+```
 
 ### 1. Training with Config Files
 The platform supports Python-based configuration files where hyperparameters and neural networks are instantiated directly in Python:
