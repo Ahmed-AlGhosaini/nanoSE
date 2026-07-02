@@ -88,6 +88,12 @@ def main():
         choices=["crn", "crntiny", "fastenhancer", "fastenhancercompact", "glumaskd", "glumasked", "comfi_fastgrnn"],
         help="Fallback model architecture type if it cannot be auto-detected from filename",
     )
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Path to python configuration file defining the model."
+    )
     args = parser.parse_args()
 
     # Find the latest checkpoint if not provided
@@ -131,17 +137,54 @@ def main():
         device = torch.device("cpu")
     print(f"Running evaluation on device: {device.type.upper()}")
 
-    # Determine model type (auto-detect based on checkpoint filename, fallback to --model)
-    model_name = args.model
-    filename_lower = os.path.basename(checkpoint_path).lower()
-    if "fastenhancer" in filename_lower:
-        model_name = "fastenhancer"
-    elif "crn" in filename_lower:
-        model_name = "crn"
-
     # 1. Load model
-    print(f"Loading {model_name} model...")
-    model = get_model(model_name).to(device)
+    model_obj = None
+    if args.config:
+        print(f"Loading model configuration from {args.config}...")
+        if not os.path.exists(args.config):
+            print(f"Error: Config file '{args.config}' not found.")
+            return
+
+        from models.crn import CRN, CRNTiny
+        from models.fastenhancer import FastEnhancerCompact
+        from models.glumaskd import GLUMaskd
+        from models.comfi_fastgrnn import ComfiFastGRNNModel
+
+        config_vars = {}
+        local_ns = {
+            "CRN": CRN,
+            "CRNTiny": CRNTiny,
+            "FastEnhancerCompact": FastEnhancerCompact,
+            "GLUMaskd": GLUMaskd,
+            "ComfiFastGRNNModel": ComfiFastGRNNModel,
+            "torch": torch
+        }
+        try:
+            with open(args.config, "r") as f:
+                exec(f.read(), local_ns, config_vars)
+            model_obj = config_vars.get("model")
+        except Exception as e:
+            print(f"Error executing configuration file {args.config}: {e}")
+            return
+
+    if model_obj is not None:
+        if isinstance(model_obj, torch.nn.Module):
+            model = model_obj.to(device)
+            model_name = model.__class__.__name__
+        else:
+            model = get_model(model_obj).to(device)
+            model_name = str(model_obj)
+        print(f"Loaded custom model object from config: {model_name}")
+    else:
+        # Determine model type (auto-detect based on checkpoint filename, fallback to --model)
+        model_name = args.model
+        filename_lower = os.path.basename(checkpoint_path).lower()
+        if "fastenhancer" in filename_lower:
+            model_name = "fastenhancer"
+        elif "crn" in filename_lower:
+            model_name = "crn"
+        print(f"Loading {model_name} model...")
+        model = get_model(model_name).to(device)
     state_dict = torch.load(checkpoint_path, map_location=device)
     clean_state_dict = {}
     for k, v in state_dict.items():

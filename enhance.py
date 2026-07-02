@@ -35,6 +35,12 @@ def main():
         choices=["crn", "crntiny", "fastenhancer", "fastenhancercompact", "glumaskd", "glumasked", "comfi_fastgrnn"],
         help="Model architecture of the checkpoint",
     )
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Path to python configuration file defining the model."
+    )
     args = parser.parse_args()
 
     if not os.path.exists(args.noisy_wav):
@@ -55,8 +61,46 @@ def main():
     print(f"Using device: {device.type.upper()}")
 
     # 1. Load trained model
-    print(f"Loading {args.model} model checkpoint...")
-    model = get_model(args.model).to(device)
+    model_obj = None
+    if args.config:
+        print(f"Loading model configuration from {args.config}...")
+        if not os.path.exists(args.config):
+            print(f"Error: Config file '{args.config}' not found.")
+            return
+
+        from models.crn import CRN, CRNTiny
+        from models.fastenhancer import FastEnhancerCompact
+        from models.glumaskd import GLUMaskd
+        from models.comfi_fastgrnn import ComfiFastGRNNModel
+
+        config_vars = {}
+        local_ns = {
+            "CRN": CRN,
+            "CRNTiny": CRNTiny,
+            "FastEnhancerCompact": FastEnhancerCompact,
+            "GLUMaskd": GLUMaskd,
+            "ComfiFastGRNNModel": ComfiFastGRNNModel,
+            "torch": torch
+        }
+        try:
+            with open(args.config, "r") as f:
+                exec(f.read(), local_ns, config_vars)
+            model_obj = config_vars.get("model")
+        except Exception as e:
+            print(f"Error executing configuration file {args.config}: {e}")
+            return
+
+    if model_obj is not None:
+        if isinstance(model_obj, torch.nn.Module):
+            model = model_obj.to(device)
+            model_name = model.__class__.__name__
+        else:
+            model = get_model(model_obj).to(device)
+            model_name = str(model_obj)
+        print(f"Loaded custom model object from config: {model_name}")
+    else:
+        print(f"Loading {args.model} model checkpoint...")
+        model = get_model(args.model).to(device)
 
     # Load state dict (handle potential torch.compile wrapper)
     state_dict = torch.load(args.checkpoint, map_location=device)
