@@ -204,6 +204,12 @@ def main():
     parser.add_argument("--lr", type=float, default=None, help="Learning rate")
     parser.add_argument("--wd", type=float, default=None, help="Weight decay")
     parser.add_argument(
+        "--warmup-steps",
+        type=int,
+        default=None,
+        help="Linear LR warmup length in steps (default 500, capped at half the run)",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Run a quick dry-run with a tiny dataset fraction",
@@ -446,7 +452,12 @@ def main():
 
     # Initialize Cosine Annealing learning rate scheduler with linear warmup (step-wise)
     total_steps = args.epochs * len(train_loader)
-    warmup_steps = 500
+    warmup_steps = getattr(args, "warmup_steps", None)
+    if warmup_steps is None:
+        warmup_steps = 500
+    # A warmup longer than the run itself would mean the LR never reaches its peak
+    warmup_steps = min(int(warmup_steps), max(1, total_steps // 2))
+    print(f"LR schedule: {warmup_steps} warmup steps out of {total_steps} total steps")
 
     def lr_lambda(current_step: int):
         if current_step < warmup_steps:

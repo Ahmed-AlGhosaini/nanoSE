@@ -2,6 +2,11 @@
 
 Lightweight speech enhancement model training platform.
 
+> **Homework solutions live in [`notebooks/`](notebooks/README.md)** — one notebook per
+> assignment task (activation function, learning rate, time-to-quality, single epoch,
+> own experiment), plus the `create_report.py` deliverable. Start with
+> [`notebooks/00_setup_and_data.ipynb`](notebooks/00_setup_and_data.ipynb).
+
 ## Installation
 
 Ensure you have Python 3.8+ installed.

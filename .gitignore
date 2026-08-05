@@ -54,3 +54,8 @@ env/
 runs/
 checkpoints/
 *.bin
+
+# Notebook scratch output (report/nanose.md itself IS tracked)
+demo/
+report/_tables.md
+notebooks/experiment_runs.json
